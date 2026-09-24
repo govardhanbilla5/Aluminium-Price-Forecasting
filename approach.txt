@@ -1,0 +1,78 @@
+Problem: Given a part number, predict Price of this for the next 12 months
+
+##Standard Quarters
+JAN, FEB, MARCH, (1st Quarter) 
+April, May, June (2nd Quarter)
+July, August , September (3rd quarter)
+Oct, Nov, December (4th Quarter)
+
+Note:base/predicted Prices of any quarter will remain same
+Example:
+JAN, FEB, MARCH >> Same Price 
+April, May, June >> Same Price
+July, August , September >> Same price
+Oct, Nov, December >> Same price
+
+
+PPI Prediction for next 12 months from our model
+LME Prediction for next 12 future months from our model
+Midwest premium prediction for next 12 months will be fetched from the website(Already available)
+CNG is constant that is 0.97
+Drauss factor is constant that is 1.44
+
+
+Let's assume we are sitting in Feb 2026
+
+#####################################Prediction for March#############################################################################################
+
+P_March  =  P_Feb  (As price will remain same for all months in a quarter)
+
+#####################################Prediction for April(Formula work only for the new quarter)#########################################################
+
+P_April  =  P_march(price of previous month/previous quarter)  +  { [ (AMS_Q)  −  (AMS_Q-1) ]  ×  PWt }  +  (PPI_Factor  ×  P_march)
+
+AMS_Q  =  (MC_Q  ×  DF_c)  +  CNG_Q          |          PPI_Factor  =  (PPI_Q  −  PPI_Q-1)  /  PPI_Q-1
+
+
+MC_Q = [(LME of current month(April) + Midwest of current month(April)]*0.91+ 1.25
+MC_Q_1= [LME of last month of previous quarter(March) + Midwest of last month of previous quarter(March)]*0.91+1.25
+PPI_Q=Average of current quarter of the month to be predicted(April, May, June)
+PPI_Q-1=Average of previous quarter(Jan,Feb,March) or, last month value of previous quarter if historical value is present(March)
+CNG_Q= Constant(0.97)
+CNG_Q_1= Constant(0.97)
+Pwt constant for each part
+DF_c= constant(1.44)
+P_current= we have already calculated for March in step 1
+
+
+ 
+
+
+#############################################Prediction for May/june######################################################################################
+P_April=P_May=P_June
+NOTE:All the variables will also be same as of April
+
+#################################################Prediction for July###################################################################################
+
+P_July  =  P_(price of previous month i.e June/previous quarter)  +  { [ (AMS_Q)  −  (AMS_Q-1) ]  ×  PWt }  +  (PPI_Factor  ×  P_march)
+
+AMS_Q  =  (MC_Q  ×  DF_c)  +  CNG_Q          |          PPI_Factor  =  (PPI_Q  −  PPI_Q-1)  /  PPI_Q-1
+
+
+MC_Q = [(LME of current month(July) + Midwest of current month(July)]*0.91+ 1.25
+MC_Q_1= [LME of last month of previous quarter(June) + Midwest of last month of previous quarter(June)]*0.91+1.25
+PPI_Q=Average of current quarter(July, Aug, Sept)
+PPI_Q-1=Average of previous quarter(April,May,june) or, last month value of previous quarter if historical value is present(June)
+CNG_Q= Constant(0.97)
+CNG_Q_1= Constant(0.97)
+Pwt constant for each part
+DF_c= constant(1.44)
+P_current= we have already calculated for June(The price remains same as P_April=P_May=P_June)
+
+#################################################Prediction for Aug/Sept############################################################################
+P_July=P_Aug=P_Sept (As price will remain same for all months in a quarter)
+NOTE:All the variables will also be same as of July
+
+
+And so on.......................
+
