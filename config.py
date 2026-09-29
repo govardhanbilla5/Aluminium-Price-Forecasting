@@ -22,15 +22,19 @@ class Settings(BaseSettings):
 
     # MC = (LME + Midwest) × MC_MULTIPLIER + MC_OFFSET
     MC_MULTIPLIER: float = 0.91
-    MC_OFFSET: float = 1.25
+    MC_OFFSET: float = 1.2
 
     # Actual (published) PPI values reach up to this many months before the
     # current month; anything later in the sheet is a projection.
     # Sitting in September with lag 2 → actuals through July.
-    PPI_ACTUAL_LAG_MONTHS: int = 2
+    PPI_ACTUAL_LAG_MONTHS: int = 1
 
     # How many future months to forecast
     FORECAST_HORIZON_MONTHS: int = 12
+
+    DEADBAND_PCT: float = 0.02
+
+    PRICE_LAG_MONTHS: int = 2
 
     class Config:
         env_file = ".env"
