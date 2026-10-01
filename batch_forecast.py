@@ -65,7 +65,7 @@ def _build_columns() -> list[tuple[str, str, callable]]:
         ("MC_Q-1\n($/lb)",       "$0.000000",     lambda pn, t1, fr, mf: _ctx(mf).mc_q_1),
         ("PPI_Q",                "0.000",         lambda pn, t1, fr, mf: _ctx(mf).ppi_q),
         ("PPI_Q-1",              "0.000",         lambda pn, t1, fr, mf: _ctx(mf).ppi_q_1),
-        ("PPI Factor",           "0.000000%",     lambda pn, t1, fr, mf: _ctx(mf).ppi_factor),
+        ("PPI Factor",           "0.000000",      lambda pn, t1, fr, mf: _ctx(mf).ppi_factor), # NEW  #HERE CHANGED FROM "0.000000%" to "0.000000"
         ("CNG_Q\n($/lb)",        "$0.0000",       lambda pn, t1, fr, mf: _ctx(mf).cng_q),
         ("CNG_Q-1\n($/lb)",      "$0.0000",       lambda pn, t1, fr, mf: _ctx(mf).cng_q_1),
         ("AMS_Q\n($/lb)",        "$0.000000",     lambda pn, t1, fr, mf: _ctx(mf).ams_q),
@@ -73,6 +73,8 @@ def _build_columns() -> list[tuple[str, str, callable]]:
         ("AMS Delta\n($/lb)",    "$0.000000",     lambda pn, t1, fr, mf: _ctx(mf).ams_delta),
         ("DF_c",                 "0.00",          lambda pn, t1, fr, mf: mf.df_c),
         ("Predicted Price\n($)", "$#,##0.0000",   lambda pn, t1, fr, mf: mf.predicted_price),
+        ("Predicted Price\n(without deadband)", "$#,##0.0000", lambda pn, t1, fr, mf: mf.predicted_price_without_deadband),  # NEW
+
     ]
 
 
