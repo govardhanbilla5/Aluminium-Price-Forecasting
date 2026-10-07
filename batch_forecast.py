@@ -58,22 +58,22 @@ def _build_columns() -> list[tuple[str, str, callable]]:
         ("Part Number",          "@",             lambda pn, t1, fr, mf: pn),
         ("Tier 1",               "@",             lambda pn, t1, fr, mf: t1),
         ("Weight\n(lbs)",        "0.00",          lambda pn, t1, fr, mf: fr.pwt_lbs),
-        ("Base Price\n($)",      "$#,##0.0000",   lambda pn, t1, fr, mf: mf.base_price_used),
+        ("Base Price\n($)",      "$#,##0.00",   lambda pn, t1, fr, mf: round(mf.base_price_used, 2)),
         ("Quarter\n(Current)",   "@",             lambda pn, t1, fr, mf: _ctx(mf).quarter_label),
         ("Quarter\n(Previous)",  "@",             lambda pn, t1, fr, mf: _ctx(mf).prev_quarter_label),
-        ("MC_Q\n($/lb)",         "$0.000000",     lambda pn, t1, fr, mf: _ctx(mf).mc_q),
-        ("MC_Q-1\n($/lb)",       "$0.000000",     lambda pn, t1, fr, mf: _ctx(mf).mc_q_1),
-        ("PPI_Q",                "0.000",         lambda pn, t1, fr, mf: _ctx(mf).ppi_q),
-        ("PPI_Q-1",              "0.000",         lambda pn, t1, fr, mf: _ctx(mf).ppi_q_1),
-        ("PPI Factor",           "0.000000",      lambda pn, t1, fr, mf: _ctx(mf).ppi_factor), # NEW  #HERE CHANGED FROM "0.000000%" to "0.000000"
-        ("CNG_Q\n($/lb)",        "$0.0000",       lambda pn, t1, fr, mf: _ctx(mf).cng_q),
-        ("CNG_Q-1\n($/lb)",      "$0.0000",       lambda pn, t1, fr, mf: _ctx(mf).cng_q_1),
-        ("AMS_Q\n($/lb)",        "$0.000000",     lambda pn, t1, fr, mf: _ctx(mf).ams_q),
-        ("AMS_Q-1\n($/lb)",      "$0.000000",     lambda pn, t1, fr, mf: _ctx(mf).ams_q_1),
-        ("AMS Delta\n($/lb)",    "$0.000000",     lambda pn, t1, fr, mf: _ctx(mf).ams_delta),
-        ("DF_c",                 "0.00",          lambda pn, t1, fr, mf: mf.df_c),
-        ("Predicted Price\n($)", "$#,##0.0000",   lambda pn, t1, fr, mf: mf.predicted_price),
-        ("Predicted Price\n(without deadband)", "$#,##0.0000", lambda pn, t1, fr, mf: mf.predicted_price_without_deadband),  # NEW
+        ("MC_Q\n($/lb)",         "$0.00",     lambda pn, t1, fr, mf: round(_ctx(mf).mc_q, 2)),
+        ("MC_Q-1\n($/lb)",       "$0.00",     lambda pn, t1, fr, mf: round(_ctx(mf).mc_q_1, 2)),
+        ("PPI_Q",                "0.000",         lambda pn, t1, fr, mf: round(_ctx(mf).ppi_q, 3)),
+        ("PPI_Q-1",              "0.000",         lambda pn, t1, fr, mf: round(_ctx(mf).ppi_q_1, 3)),
+        ("PPI Factor",           "0.000",      lambda pn, t1, fr, mf: round(_ctx(mf).ppi_factor, 3)),
+        ("CNG_Q\n($/lb)",        "General",       lambda pn, t1, fr, mf: _ctx(mf).cng_q),
+        ("CNG_Q-1\n($/lb)",      "General",       lambda pn, t1, fr, mf: _ctx(mf).cng_q_1),
+        ("AMS_Q\n($/lb)",        "$0.00",     lambda pn, t1, fr, mf: round(_ctx(mf).ams_q, 2)),
+        ("AMS_Q-1\n($/lb)",      "$0.00",     lambda pn, t1, fr, mf: round(_ctx(mf).ams_q_1, 2)),
+        ("AMS Delta\n($/lb)",    "$0.00",     lambda pn, t1, fr, mf: round(_ctx(mf).ams_delta, 2)),
+        ("DF_c",                 "General",          lambda pn, t1, fr, mf: mf.df_c),
+        ("Predicted Price\n($)", "$#,##0.00",   lambda pn, t1, fr, mf: round(mf.predicted_price, 2)),
+        ("Predicted Price\n(without deadband)", "$#,##0.00", lambda pn, t1, fr, mf: round(mf.predicted_price_without_deadband, 2)),  # NEW
 
     ]
 
@@ -176,7 +176,7 @@ def build_forecast_workbook(
     engine: ForecastEngine,
     cng_q: float,
     cng_q_1: float,
-    include_current_month: bool = False,
+    include_current_month: bool = True,
 ) -> bytes:
     """
     Run forecasts for all (part_number, tier_1) pairs and build output workbook.
@@ -255,6 +255,9 @@ def build_forecast_workbook(
     # ── Step 4: summary sheet ─────────────────────────────────────────────
     _build_summary_sheet(wb, part_tier_pairs, results, month_labels)
 
+    ### For base price summary sheet
+    _build_base_price_summary_sheet(wb, part_tier_pairs, results, month_labels)   # NEW
+
     # ── Step 5: serialise ─────────────────────────────────────────────────
     buf = io.BytesIO()
     wb.save(buf)
@@ -286,15 +289,51 @@ def _build_summary_sheet(
         _write_data(ws, ri, 1, pn,               "@",            fill, left=True)
         _write_data(ws, ri, 2, t1,               "@",            fill, left=True)
         _write_data(ws, ri, 3, result.pwt_lbs,   "0.00",         fill)
-        _write_data(ws, ri, 4, result.base_price, "$#,##0.0000", fill)
+        _write_data(ws, ri, 4, round(result.base_price, 2), "$#,##0.00", fill) # # change to "$#,##0.00" and result.base_price to round(result.base_price,2)
 
         for mi, (year_month, _) in enumerate(month_labels):
             mf  = next((f for f in result.forecasts if f.year_month == year_month), None)
-            val = mf.predicted_price if mf else "N/A"
-            _write_data(ws, ri, 5 + mi, val, "$#,##0.0000", fill)
+            val = round(mf.predicted_price, 2) if mf else "N/A"   ##### mf.predicted_price to round(mf.predicted_price, 2)
+            _write_data(ws, ri, 5 + mi, val, "$#,##0.00", fill)   ## change to "$#,##0.00"
 
     # Column widths
     for col, width in zip("ABCD", [22, 22, 12, 16]):
         ws.column_dimensions[col].width = width
     for i in range(len(month_labels)):
         ws.column_dimensions[get_column_letter(5 + i)].width = 18
+
+def _build_base_price_summary_sheet(
+    wb, part_tier_pairs, results, month_labels
+) -> None:
+    ws = wb.create_sheet(title="Base Price Summary", index=1)   # right after Summary (index=0)
+    ws.freeze_panes = "D2"                                       # was E2, shifted by 1
+
+    fixed   = ["Part Number", "Tier 1", "Weight (lbs)"]           # "Base Price ($)" removed
+    monthly = [label for _, label in month_labels]
+
+    for ci, h in enumerate(fixed + monthly, 1):
+        _write_header(ws, ci, h)
+    ws.row_dimensions[1].height = 36
+
+    for ri, (pn, t1) in enumerate(part_tier_pairs, 2):
+        fill   = _ALT_FILL if ri % 2 == 0 else _WHITE_FILL
+        result = results[(pn, t1)]
+
+        if isinstance(result, Exception):
+            _write_error_row(ws, ri, pn, t1, str(result), fill)
+            continue
+
+        _write_data(ws, ri, 1, pn,             "@",    fill, left=True)
+        _write_data(ws, ri, 2, t1,             "@",    fill, left=True)
+        _write_data(ws, ri, 3, result.pwt_lbs, "0.00", fill)
+        # Base Price ($) column removed — month columns now start at 4
+
+        for mi, (year_month, _) in enumerate(month_labels):
+            mf  = next((f for f in result.forecasts if f.year_month == year_month), None)
+            val = round(mf.base_price_used, 2) if mf else "N/A" ### mf.base_price_used to round(mf.base_price_used, 2)
+            _write_data(ws, ri, 4 + mi, val, "$#,##0.00", fill)   # was 5 + mi ## change to "$#,##0.00"
+
+    for col, width in zip("ABC", [22, 22, 12]):                     # was "ABCD", 4 widths
+        ws.column_dimensions[col].width = width
+    for i in range(len(month_labels)):
+        ws.column_dimensions[get_column_letter(4 + i)].width = 18   # was 5 + i
