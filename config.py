@@ -22,7 +22,7 @@ class Settings(BaseSettings):
 
     # MC = (LME + Midwest) × MC_MULTIPLIER + MC_OFFSET
     MC_MULTIPLIER: float = 0.91
-    MC_OFFSET: float = 1.2
+    MC_OFFSET: float = 0.558883           #CHANGED  ######1.2
 
     # Actual (published) PPI values reach up to this many months before the
     # current month; anything later in the sheet is a projection.
