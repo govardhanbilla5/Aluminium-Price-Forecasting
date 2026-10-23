@@ -130,6 +130,16 @@ class MonthForecast(BaseModel):
     predicted_price: float = Field(
         ..., description="Forecasted aluminium price for this part ($/lb)"
     )
+    # ── MODIFICATION ────────────────────────────────────────
+    # This is predicted_price_without_deadband: the raw formula output before the +/-2% deadband check was applied.
+    # This is the new feature as per thapase/srikanth requirements on 09/30/2026
+    predicted_price_without_deadband: float = Field(     # NEW
+        ...,
+        description=(
+            "Raw formula output before the +/-2% deadband check was applied. "
+            "Equals predicted_price when the deadband did not trigger."
+        ),
+    )
     base_price_used: float = Field(
         ...,
         description=(
