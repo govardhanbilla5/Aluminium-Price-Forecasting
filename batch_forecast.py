@@ -372,6 +372,9 @@ def build_preview_from_rows(
         part_rows, engine, include_current_month
     )
 
+    # NEW - AOP, same source the Excel workbook uses
+    aop_lookup = _load_aop_lookup()   
+
     month_labels: list[tuple[str, str]] = []
     for r in results.values():
         if isinstance(r, ForecastResponse):
@@ -424,6 +427,43 @@ def build_preview_from_rows(
             "error": None,
         })
 
+    # NEW - AOP ===================================
+    # Total AOP Summary (on-screen)
+    # Mirrors the "Total AOP Summary" Excel sheet: Total AOP ($) per part per month
+    aop_summary: list[dict] = []
+    aop_grand_total = 0.0
+    if aop_lookup:
+        for pn, t1 in part_tier_pairs:
+            r = results[(pn, t1)]
+            if isinstance(r, Exception):
+                aop_summary.append({"part_number": pn, "tier_1": t1, "error": str(r)})
+                continue
+            _pn, _t1 = pn.strip().lower(), t1.strip().lower()
+            monthly_aop = []
+            part_total = 0.0
+            has_value = False
+            for ym, _ in month_labels:
+                mf = next((f for f in r.forecasts if f.year_month == ym), None)
+                month_total = None
+                if mf is not None:
+                    aop_qty = aop_lookup.get((_pn, _t1, ym))
+                    if aop_qty is None:
+                        aop_qty = aop_lookup.get((_pn, "", ym))
+                    month_total = compute_total_aop(mf.predicted_price, aop_qty) # Modified
+                    #month_total = compute_total_aop(mf.base_price_used, aop_qty)
+                    if month_total is not None:
+                        part_total += month_total
+                        has_value = True
+                monthly_aop.append(round(month_total, 2) if month_total is not None else None)
+            if has_value:
+                aop_grand_total += part_total
+            aop_summary.append({
+                "part_number": pn, "tier_1": t1,
+                "monthly": monthly_aop,
+                "total_all_months": round(part_total, 2) if has_value else None,
+                "error": None,
+            })
+    # ==============================================
 
     monthly_sheets: list[dict] = []
     for ym, label in month_labels:
@@ -438,6 +478,15 @@ def build_preview_from_rows(
                 rows.append({"part_number": pn, "tier_1": t1, "error": f"No data for {ym}"})
                 continue
             q = mf.quarter_context
+            # NEW - AOP ===================================
+            total_aop = None
+            if aop_lookup:
+                _pn, _t1 = pn.strip().lower(), t1.strip().lower()
+                aop_qty = aop_lookup.get((_pn, _t1, ym))
+                if aop_qty is None:
+                    aop_qty = aop_lookup.get((_pn, "", ym))
+                total_aop = compute_total_aop(mf.predicted_price, aop_qty)
+            # ==============================================
             rows.append({
                 "part_number": pn, "tier_1": t1,
                 "weight_lbs": r.pwt_lbs, "base_price_used": mf.base_price_used,
@@ -447,23 +496,26 @@ def build_preview_from_rows(
                 "cng_q": q.cng_q, "cng_q_1": q.cng_q_1,
                 "ams_q": q.ams_q, "ams_q_1": q.ams_q_1, "ams_delta": q.ams_delta,
                 "predicted_price": mf.predicted_price, 
-                # ── MODIFICATION ──────────────────────────────────────── 
-                "predicted_price_without_deadband": mf.predicted_price_without_deadband,   #
-                # ─────────────────────────────────────────────────────────                
+                "predicted_price_without_deadband": mf.predicted_price_without_deadband,
+                # NEW - AOP ===================================
+                "total_aop": round(total_aop, 2) if total_aop is not None else None,   # NEW - AOP
+                # NEW - AOP ===================================              
                 "error": None,
 
             })
         monthly_sheets.append({"year_month": ym, "label": label, "rows": rows})
-
+    print(f"AOP GRAND TOTAL VALUE: {round(aop_grand_total, 2)}")
     return {
         "part_count": len(part_tier_pairs),
         "ok": n_ok,
         "failed": n_failed,
         "months": [{"year_month": ym, "month_label": label} for ym, label in month_labels],
         "summary": summary,
-        # ── MODIFICATION ──────────────────────────────────────── 
-        "base_price_summary": base_price_summary,      #
-        # ─────────────────────────────────────────────────────────
+        "base_price_summary": base_price_summary,
+        # NEW - AOP ===================================
+        "aop_summary": aop_summary,                 # NEW - AOP
+        "aop_grand_total": round(aop_grand_total, 2) if aop_lookup else None,  # NEW - AOP
+        # =============================================
         "monthly_sheets": monthly_sheets,
     }
 
@@ -545,8 +597,13 @@ def _build_workbook_from_results(
                 aop_qty = aop_lookup.get((_pn, _t1, year_month))      # tier-specific AOP first
                 if aop_qty is None:
                     aop_qty = aop_lookup.get((_pn, '', year_month))   # else item-level AOP (no tier)
-                _write_data(ws, ri, N_COLS + 1,
-                            compute_total_aop(mf.predicted_price, aop_qty),
+                # _write_data(ws, ri, N_COLS + 1,
+                #             compute_total_aop(mf.predicted_price, aop_qty),
+                #             "$#,##0.00", fill)
+                # NEW-AOP(qty*base_price_summary_sheet)
+                # This is modified as per the thapase requirement on 10/26/2026
+                _write_data(ws, ri, N_COLS + 1, 
+                            compute_total_aop(round(mf.base_price_used, 2), aop_qty), 
                             "$#,##0.00", fill)
             # ======================================================================
 
@@ -710,7 +767,10 @@ def _build_total_aop_summary_sheet(
                 aop_qty = aop_lookup.get((_pn, _t1, year_month))          # tier-specific AOP first
                 if aop_qty is None:
                     aop_qty = aop_lookup.get((_pn, "", year_month))       # else item-level AOP (no tier)
-                month_total = compute_total_aop(mf.predicted_price, aop_qty)   # None if no qty
+                #month_total = compute_total_aop(mf.predicted_price, aop_qty)   # None if no qty
+                # NEW - AOP (qty*base_price_summary_sheet)
+                # This is modified as per the thapase requirement on 10/26/2026
+                month_total = compute_total_aop(round(mf.base_price_used, 2), aop_qty)   # None if no qty
                 if month_total is not None:
                     part_total += month_total
                     has_value = True
