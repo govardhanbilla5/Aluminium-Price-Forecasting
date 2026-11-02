@@ -449,8 +449,8 @@ def build_preview_from_rows(
                     aop_qty = aop_lookup.get((_pn, _t1, ym))
                     if aop_qty is None:
                         aop_qty = aop_lookup.get((_pn, "", ym))
-                    month_total = compute_total_aop(mf.predicted_price, aop_qty) # Modified
-                    #month_total = compute_total_aop(mf.base_price_used, aop_qty)
+                    # month_total = compute_total_aop(mf.predicted_price, aop_qty) # Modified
+                    month_total = compute_total_aop(round(mf.base_price_used, 2), aop_qty)  ######
                     if month_total is not None:
                         part_total += month_total
                         has_value = True
@@ -485,7 +485,8 @@ def build_preview_from_rows(
                 aop_qty = aop_lookup.get((_pn, _t1, ym))
                 if aop_qty is None:
                     aop_qty = aop_lookup.get((_pn, "", ym))
-                total_aop = compute_total_aop(mf.predicted_price, aop_qty)
+                #total_aop = compute_total_aop(mf.predicted_price, aop_qty)
+                total_aop = compute_total_aop(round(mf.base_price_used, 2), aop_qty)  ######### 
             # ==============================================
             rows.append({
                 "part_number": pn, "tier_1": t1,
@@ -504,7 +505,7 @@ def build_preview_from_rows(
 
             })
         monthly_sheets.append({"year_month": ym, "label": label, "rows": rows})
-    print(f"AOP GRAND TOTAL VALUE: {round(aop_grand_total, 2)}")
+    # print(f"AOP GRAND TOTAL VALUE: {round(aop_grand_total, 2)}")
     return {
         "part_count": len(part_tier_pairs),
         "ok": n_ok,
