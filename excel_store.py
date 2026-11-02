@@ -39,6 +39,124 @@ _DEFAULT_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "aluminium_d
 EXCEL_FILE_PATH: str = os.environ.get("ALUMINIUM_EXCEL_PATH", _DEFAULT_PATH)
 
 
+
+# =============================================================================
+from openpyxl.cell.cell import MergedCell
+# NEW - Midwest
+# future values of 'midwest_input' ($/MT) -> $/lb -> 'Midwest' sheet
+# Called once from _load_workbook_data() just before the workbook is read, so the engine
+# always reads the values from the 'Midwest' sheet. Nothing else is changed.
+MIDWEST_INPUT_SHEET = "midwest_input"      # sheet the user fills: Month | Future ($/MT) | Past ($/lb)
+MIDWEST_SHEET = "Midwest"                  # sheet the forecast engine reads ($/lb)
+MIDWEST_FUTURE_DIVISOR = 2204.6226         # $/MT -> $/lb (same constant as LME)
+MIDWEST_DECIMALS = 6
+
+
+def _sync_midwest_from_input(path: str) -> int:
+    """
+    Reads 'midwest_input': the FUTURE column ($/MT) is divided by 2204.6226 ($/lb), the PAST column
+    ($/lb) is copied as it is. Both are written into the 'Midwest' sheet (col A = month, col B = value):
+    a month that matches is overwritten, a month that is not there is added at the end.
+    Saves only if something changed.
+    Never raises (a problem is logged and the workbook is read as it is). Returns the number of months written.
+    """
+    try:
+        from copy import copy
+        from datetime import datetime
+        from openpyxl import load_workbook
+
+        def _month(value):
+            if value is None or (not isinstance(value, str) and pd.isna(value)):
+                return None
+            if hasattr(value, "strftime"):
+                return value.strftime("%Y-%m")
+            return _parse_aop_month(str(value).strip())
+
+        def _num(value):
+            if value is None or (not isinstance(value, str) and pd.isna(value)):
+                return None
+            try:
+                return float(str(value).replace(",", "").strip())
+            except ValueError:
+                return None
+
+        try:
+            df = pd.read_excel(path, sheet_name=MIDWEST_INPUT_SHEET, engine="openpyxl",
+                               dtype=str, keep_default_na=False, na_values=[""])
+        except ValueError:                                   # no 'midwest_input' sheet -> old behaviour
+            return 0
+        if df.shape[1] < 2:
+            return 0
+        cols = list(df.columns)
+        past_col = next((c for c in cols[1:] if "past" in str(c).lower()), None)
+        future_col = next((c for c in cols[1:] if "future" in str(c).lower()), None)
+        if future_col is None:                               # no 'future' word: the column that is not 'past'
+            future_col = next((c for c in cols[1:] if c != past_col), None)
+        if future_col is None:
+            return 0
+        values = {}
+        for _, row in df.iterrows():
+            ym = _month(row[cols[0]])
+            if not ym:
+                continue
+            past = _num(row[past_col]) if past_col is not None else None
+            future = _num(row[future_col])
+            if past is not None:
+                values[ym] = (past, 0.0)                                                  # $/lb, copied as it is
+            if future is not None:                                                        # $/MT -> $/lb (wins if both are filled)
+                values[ym] = (round(future / MIDWEST_FUTURE_DIVISOR, MIDWEST_DECIMALS),
+                              0.5 * 10 ** (-MIDWEST_DECIMALS))
+        if not values:
+            return 0
+
+        mtime = os.path.getmtime(path)
+        wb = load_workbook(path)
+        name = next((n for n in wb.sheetnames if n.strip().lower() == MIDWEST_SHEET.lower()), None)
+        if name is None:
+            return 0
+        ws = wb[name]
+        row_of, last_row = {}, 1
+        for r in range(2, ws.max_row + 1):
+            ym = _month(ws.cell(row=r, column=1).value)
+            if ym:
+                row_of[ym], last_row = r, r
+        month_is_date = hasattr(ws.cell(row=last_row, column=1).value, "strftime")
+
+        changed = 0
+        for ym in sorted(values):
+            new, tolerance = values[ym]
+            if ym in row_of:
+                cell = ws.cell(row=row_of[ym], column=2)
+                old = _num(cell.value)
+                if old is not None and abs(old - new) <= tolerance:
+                    continue                                 # already the same value
+                cell.value = new
+            else:
+                last_row += 1
+                for col in (1, 2):                           # same look as the row above
+                    src, dst = ws.cell(row=last_row - 1, column=col), ws.cell(row=last_row, column=col)
+                    if src.has_style:
+                        dst.font, dst.fill, dst.border = copy(src.font), copy(src.fill), copy(src.border)
+                        dst.alignment, dst.number_format = copy(src.alignment), src.number_format
+                ws.cell(row=last_row, column=1).value = (
+                    datetime(int(ym[:4]), int(ym[5:7]), 1) if month_is_date else ym)
+                ws.cell(row=last_row, column=2).value = new
+            changed += 1
+        if not changed:
+            return 0
+        if os.path.getmtime(path) != mtime:                  # file changed meanwhile -> do not overwrite it
+            logger.warning("Midwest: workbook changed while reading - not written this time")
+            return 0
+        wb.save(path)
+        logger.info("Midwest sheet updated from '%s' ($/MT -> $/lb): %d month(s)", MIDWEST_INPUT_SHEET, changed)
+        return changed
+    except Exception:
+        logger.exception("Midwest: could not update the 'Midwest' sheet from '%s' - workbook read as it is",
+                         MIDWEST_INPUT_SHEET)
+        return 0
+# =============================================================================
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # CACHED LOADER
 # ─────────────────────────────────────────────────────────────────────────────
@@ -51,9 +169,14 @@ def _load_workbook_data(path: str) -> dict[str, pd.DataFrame]:
             f"Excel data file not found at '{path}'. "
             "Set ALUMINIUM_EXCEL_PATH environment variable to the correct path."
         )
+
+    # =============================================================================
+    # NEW - Midwest
+    _sync_midwest_from_input(path)                   # NEW - Midwest: future $/MT -> $/lb into the Midwest sheet
+    # =============================================================================
     sheets = pd.read_excel(
         path,
-        sheet_name=["Parts", "LME", "Midwest", "PPI", "AOP"],
+        sheet_name=["Parts", "LME", "Midwest", "PPI", "AOP", "lme_input", "ppi_input"],  ### NEW NEW NEW
         engine="openpyxl",
         dtype=str,          # read everything as str first; we cast per column
         keep_default_na=False,  # prevent 'NA', 'N/A' etc. from becoming NaN
