@@ -34,6 +34,15 @@ from openpyxl import load_workbook
  
 from app.data import excel_store
 from app.data.excel_store import EXCEL_FILE_PATH
+from app.services import ppi_forecast as _ppi          # NEW: shares the backup flag #####
+
+#####
+from pathlib import Path
+import sys
+if getattr(sys, "frozen", False):
+    ROOT_DIR = Path(sys.executable).parent
+else:
+    ROOT_DIR = Path(__file__).resolve().parents[3]
  
 logger = logging.getLogger(__name__)
  
@@ -51,12 +60,17 @@ BACKTEST_MONTHS = 12             # accuracy check: the last N months are hidden,
 WRITE_ACCURACY = True            # True: model accuracy (100 - MAPE, %) is written into the LME sheet
 ACCURACY_HEADER = "Accuracy (%)"  # header of the accuracy column in the LME sheet (created if missing)
 ACCURACY_DECIMALS = 2            # decimals of the accuracy value
+# NEW - LME BACKTEST =======
+WRITE_BACKTEST_SHEET = True      # True: the backtest table (actual vs predicted) is written into its own sheet
+BACKTEST_SHEET = "lme_backtest"  # sheet that receives the backtest table (created if missing, rewritten when it changes)
+# ==========================
 # <<< end NEW
 MIN_MONTHS = 24                  # minimum history needed for the seasonal model
 SARIMA_ORDER = (1, 1, 0)
 SARIMA_SEASONAL_ORDER = (0, 1, 1, 12)
-BACKUP_BEFORE_UPDATE = False      # copy of the workbook before the LME sheet is changed
-MAX_BACKUPS = 0                  # only the newest N backup copies are kept (older ones are deleted)
+BACKUP_BEFORE_UPDATE = True      # copy of the workbook before the LME sheet is changed
+MAX_BACKUPS = 20                  # only the newest N backup copies are kept (older ones are deleted)
+BACKUP_DIR = ROOT_DIR #####
 SYNC_ACTUALS_TO_LME_SHEET = False  # True: months that are actual in lme_input also replace the old predicted
                                    # value in the LME sheet (existing LME rows only, no new rows)
 DATE_COL_CANDIDATES = ("date", "month", "month (yyyy-mm)")
@@ -379,10 +393,96 @@ def backtest_accuracy(ts_fixed: pd.Series, months: int = BACKTEST_MONTHS) -> Opt
         return None
     train, test = ts_fixed.iloc[:-months], ts_fixed.iloc[-months:]
     predicted = forecast_lme(train, months)
+    # NEW - LME BACKTEST =======
+    _store_backtest(test, predicted)               # keep actual vs predicted of this backtest for the sheet
+    # ==========================
     mape = float((abs(test.values - predicted.values) / test.values).mean() * 100)
     return round(100 - mape, ACCURACY_DECIMALS)
- 
- 
+
+
+# NEW - LME BACKTEST =======
+BACKTEST_HEADERS = ["Month",
+                    "Actual (lme_input) ($/lb)",
+                    "Predicted (backtest) ($/lb)"]
+_last_backtest = None            # backtest table of the last model run (index = month; actual_cleaned, predicted, actual_raw)
+
+
+# [NEW function] _reset_backtest()
+#   Forgets the backtest table of the previous run (called at the start of every refresh).
+def _reset_backtest() -> None:
+    global _last_backtest
+    _last_backtest = None
+
+
+# [NEW function] _store_backtest()
+#   Keeps the backtest actual and predicted values of this run. Called by backtest_accuracy().
+def _store_backtest(test: pd.Series, predicted: pd.Series) -> None:
+    global _last_backtest
+    _last_backtest = pd.DataFrame({"actual_cleaned": test.values, "predicted": predicted.values},
+                                  index=test.index)
+
+
+# [NEW function] _attach_raw_actuals()
+#   Adds the original lme_input values (before the IQR outlier fix) to the backtest table.
+def _attach_raw_actuals(ts: pd.Series) -> None:
+    if _last_backtest is not None:
+        _last_backtest["actual_raw"] = ts.reindex(_last_backtest.index).values
+
+
+# [NEW function] _same_cell()
+#   Compares an old and a new cell value (numbers with a tiny tolerance, everything else as text).
+def _same_cell(a, b) -> bool:
+    if a is None or b is None:
+        return a is None and b is None
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        return abs(a - b) < 1e-9
+    return str(a) == str(b)
+
+
+# [NEW function] _write_backtest_sheet()
+#   Writes the backtest table (Month, Actual, Predicted) into the sheet BACKTEST_SHEET of the workbook that is
+#   being updated. The sheet is rewritten only when its content really changes. Returns True if it was written.
+def _write_backtest_sheet(wb) -> bool:
+    from openpyxl.styles import Font, PatternFill
+
+    if not WRITE_BACKTEST_SHEET or _last_backtest is None or _last_backtest.empty:
+        return False
+    div, dec = LME_UNIT_DIVISOR, LME_DECIMALS
+    cells = {}                                    # (row, column) -> value
+    for ci, h in enumerate(BACKTEST_HEADERS, 1):
+        cells[(1, ci)] = h
+    for ri, (date, r) in enumerate(_last_backtest.iterrows(), 2):
+        raw = r["actual_raw"] if "actual_raw" in r.index else None
+        actual = r["actual_cleaned"] if raw is None or pd.isna(raw) else raw     # raw value, cleaned only if raw is missing
+        cells[(ri, 1)] = date.strftime("%Y-%m")
+        cells[(ri, 2)] = round(float(actual) / div, dec)
+        cells[(ri, 3)] = round(float(r["predicted"]) / div, dec)
+
+    name = _find_sheet(wb.sheetnames, BACKTEST_SHEET)
+    if name is not None:                            # unchanged content -> do not touch the sheet
+        old = {(c.row, c.column): c.value for row in wb[name].iter_rows() for c in row if c.value is not None}
+        if old.keys() == cells.keys() and all(_same_cell(old[k], v) for k, v in cells.items()):
+            return False
+
+    index = wb.sheetnames.index(name) if name is not None else len(wb.sheetnames)
+    if name is not None:
+        wb.remove(wb[name])
+    ws = wb.create_sheet(title=name or BACKTEST_SHEET, index=index)
+    num = "0." + "0" * LME_DECIMALS if LME_DECIMALS else "0"
+    for (r, c), v in cells.items():
+        cell = ws.cell(row=r, column=c, value=v)
+        if r > 1 and c in (2, 3):
+            cell.number_format = num
+    for c in range(1, 4):
+        ws.cell(row=1, column=c).font = Font(bold=True, color="FFFFFF")
+        ws.cell(row=1, column=c).fill = PatternFill("solid", fgColor="1F3864")
+    for letter, width in zip("ABC", (12, 28, 28)):
+        ws.column_dimensions[letter].width = width
+    ws.freeze_panes = "A2"
+    return True
+# ==========================
+
+
 # [OLD function] _prune_backups()
 #   Keeps only the newest MAX_BACKUPS backup copies of the workbook. Not changed.
 def _prune_backups(path: str) -> None:
@@ -418,7 +518,8 @@ def update_lme_sheet(path: str, forecast: pd.Series, decimals: int = LME_DECIMAL
     Earlier months (actuals) and the other columns (e.g. Legend) are not touched.
     Returns the list of (month, old, new, action); the workbook is saved only if something changed.
     """
-    wb = load_workbook(path, keep_vba=path.lower().endswith(".xlsm"))
+    ###### wb = load_workbook(path, keep_vba=path.lower().endswith(".xlsm"))
+    wb = load_workbook(path, keep_vba=str(path).lower().endswith(".xlsm"))
     name = _find_sheet(wb.sheetnames, LME_SHEET)
     if name is None:
         raise ValueError(f"Sheet '{LME_SHEET}' not found in {path}. Sheets: {wb.sheetnames}")
@@ -501,7 +602,10 @@ def update_lme_sheet(path: str, forecast: pd.Series, decimals: int = LME_DECIMAL
             cell.number_format = "0." + "0" * ACCURACY_DECIMALS if ACCURACY_DECIMALS else "0"
             log.append(("Accuracy", old_acc, accuracy, "accuracy"))
     # <<< end NEW
- 
+    # NEW - LME BACKTEST =======
+    if _write_backtest_sheet(wb):                  # actual vs predicted backtest -> own sheet, same save
+        log.append(("Backtest", None, None, "backtest"))
+    # ==========================
     if not log:
         return log                                 # nothing to change -> no backup, no save
  
@@ -511,7 +615,7 @@ def update_lme_sheet(path: str, forecast: pd.Series, decimals: int = LME_DECIMAL
         logger.warning("Formulas found in sheets %s: open %s in Excel once and press Save so their "
                        "values are recalculated (openpyxl does not store formula results)",
                        formula_sheets, path)
- 
+    '''
     backup_path = None
     if BACKUP_BEFORE_UPDATE:
         root, ext = os.path.splitext(path)
@@ -522,6 +626,28 @@ def update_lme_sheet(path: str, forecast: pd.Series, decimals: int = LME_DECIMAL
     except Exception:
         if backup_path and os.path.exists(backup_path):
             os.remove(backup_path)                 # nothing was changed -> do not leave a useless backup
+        raise
+    if BACKUP_BEFORE_UPDATE:
+        _prune_backups(path)
+    return log
+    '''
+    backup_path = None
+    if BACKUP_BEFORE_UPDATE and not _ppi._backup_done:     # CHANGED: skip if PPI already backed up
+        #root, ext = os.path.splitext(path)
+        #backup_path = f"{root}_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}{ext}"
+        root, ext = os.path.splitext(os.path.basename(path)) 
+        folder = BACKUP_DIR or os.path.dirname(os.path.abspath(path))
+        os.makedirs(folder, exist_ok=True)
+        backup_path = os.path.join(
+        folder, f"{root}_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}{ext}")
+        shutil.copy2(path, backup_path)
+        _ppi._backup_done = True                           # CHANGED
+    try:
+        wb.save(path)                              # PermissionError here = file open in Excel
+    except Exception:
+        if backup_path and os.path.exists(backup_path):
+            os.remove(backup_path)                 # nothing was changed -> do not leave a useless backup
+            _ppi._backup_done = False                      # CHANGED
         raise
     if BACKUP_BEFORE_UPDATE:
         _prune_backups(path)
@@ -576,6 +702,9 @@ def refresh_lme_forecast(path: str = EXCEL_FILE_PATH, force: bool = False) -> Op
             # >>> NEW (accuracy)
             fixed = iqr_fix(ts)
             forecast = forecast_lme(fixed) / LME_UNIT_DIVISOR                # $/MT -> $/lb
+            # NEW - LME BACKTEST =======
+            _reset_backtest()                                                # NEW (backtest sheet)
+            # ==========================
             accuracy = None
             if WRITE_ACCURACY:
                 try:
@@ -583,6 +712,9 @@ def refresh_lme_forecast(path: str = EXCEL_FILE_PATH, force: bool = False) -> Op
                 except Exception as exc:                                     # accuracy must never block the forecast
                     logger.warning("LME accuracy (backtest) failed - forecast is still updated: %s", exc)
             # <<< end NEW
+            # NEW - LME BACKTEST =======
+            _attach_raw_actuals(ts)                                          # NEW (backtest sheet): add raw actuals
+            # ==========================
             log = update_lme_sheet(path, forecast,
                                    # OLD (replaced) | actuals=ts if SYNC_ACTUALS_TO_LME_SHEET else None)
                                    # >>> NEW (accuracy)
@@ -591,9 +723,10 @@ def refresh_lme_forecast(path: str = EXCEL_FILE_PATH, force: bool = False) -> Op
                                    # <<< end NEW
             _last_input_signature = signature
  
-            # >>> NEW (accuracy)
-            month_log = [e for e in log if e[3] != "accuracy"]
-            # <<< end NEW
+            # NEW - LME BACKTEST =======
+            #month_log = [e for e in log if e[3] != "accuracy"]
+            month_log = [e for e in log if e[3] not in ("accuracy", "backtest")]     # CHANGED (backtest sheet)
+            # ==========================
             if log:
                 _clear_excel_store_caches()        # engine must re-read the updated LME sheet
             # >>> NEW (accuracy)
