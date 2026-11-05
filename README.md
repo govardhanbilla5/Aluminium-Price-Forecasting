@@ -1,6 +1,6 @@
 # Aluminium Price Forecast API
 
-A FastAPI service that forecasts aluminium part prices for the next 12 months. Each month's price is built from LME, Midwest premium, PPI and CNG inputs. The base price changes only once per quarter, in the last month of the quarter, and small changes are held steady by a ±2% deadband. LME and PPI inputs can themselves be auto-forecast with SARIMA models before every batch run, and an optional AOP (Annual Operating Plan) quantity can be applied to turn unit prices into total dollar exposure per part per month.
+A FastAPI service that forecasts aluminium part prices for the next 12 months. Each month's price is built from LME, Midwest premium, PPI and CNG inputs. The base price changes only once per quarter, in the last month of the quarter, and small changes are held steady by a ±2% deadband. LME and PPI inputs can themselves be auto-forecast with SARIMA models before every batch run, and an optional AOP (Annual Operating Plan) quantity can be applied to turn the base price into total dollar exposure per part per month. Midwest and AOP values can be typed into `midwest_input` / `AOP_input` sheets and are synced into the `Midwest` / `AOP` sheets, and the workbook changes made by one batch run are covered by **one** shared backup file.
 
 ---
 
@@ -34,7 +34,8 @@ The service predicts the price of an aluminium part for the **next 12 calendar m
 - **CNG_Q and CNG_Q-1** ($/lb) are either supplied once for the whole batch in the request, or read per part from the uploaded Excel file (§3.4 of the old flow is now covered in §4/§6).
 - **Every month is calculated independently** from its own market data, using a base price chosen by the quarterly base-price rule ([2.3](#23-base-price-quarterly-rule)). A predicted price is not simply rolled into the next month.
 - **LME and PPI can be auto-forecast.** If the workbook has `lme_input` / `ppi_input` sheets of historical actuals, the batch endpoint fits a SARIMA model and refreshes the `LME` / `PPI` sheets with predicted values before every run ([3](#3-dynamic-lme--ppi-forecasting-sarima)).
-- **AOP (Annual Operating Plan)**: if the workbook has an AOP sheet of planned quantities per part per month, the batch output can show a Total AOP ($) value (quantity × predicted price) per part per month, plus a dedicated summary sheet ([4](#4-aop-annual-operating-plan)).
+- **AOP (Annual Operating Plan)**: if the workbook has an AOP sheet of planned quantities per part per month, the batch output (Excel **and** the JSON preview) shows a Total AOP ($) value (quantity × **Base Price**) per part per month, plus a dedicated summary sheet ([4](#4-aop-annual-operating-plan)).
+- **Input sheets are synced into the data sheets.** `midwest_input` → `Midwest` ([7.1](#71-midwest-input-sync)) and `AOP_input` → `AOP` ([4.5](#45-aop_input-sync-aop_syncpy)). Workbook writes made by the LME / PPI / AOP refreshes share **one backup per batch run** ([3.5](#35-one-backup-per-batch-run)).
 
 ---
 
@@ -184,7 +185,7 @@ They sum to `total_change` (`sum_check` should be 0). The breakdown uses the pri
 | `CNG_Q`, `CNG_Q-1`, `DF_c` | Not rounded | `General` | shown exactly as stored (e.g. `0.97`, not `0.9700`) |
 | Weight | Not rounded (shown with 2 decimals) | `0.00` | |
 | Summary and Base Price Summary sheets (all prices) | 2 | `$#,##0.00` | rounded |
-| Total AOP (monthly sheet and Total AOP Summary) | 2 | `$#,##0.00` | `round(unit_price × aop_qty, 2)`, blank if no AOP qty for that part/month |
+| Total AOP (monthly sheet, Total AOP Summary and JSON) | 2 | `$#,##0.00` | `round(round(base_price_used, 2) × aop_qty, 2)`, blank if no AOP qty for that part/month |
 
 So for alloy used rounding off 2 decimal places, for ppi rounding off 1 decimal places and for unit price used rounding off 2 decimal places.
 
@@ -206,10 +207,13 @@ So for alloy used rounding off 2 decimal places, for ppi rounding off 1 decimal 
 | Unit conversion | divides by `2204.6226` ($/MT → $/lb) | none |
 | Outlier handling | IQR + Winsorization (non-cascading) | IQR + Winsorization |
 | Accuracy check | 12-month backtest, `100 − MAPE`, written to an `Accuracy (%)` column (row 2) of the `LME` sheet | same, written to the `PPI` sheet |
+| Backtest table | actual vs predicted of that 12-month backtest, written to the sheet `lme_backtest` ($/lb) | written to the sheet `ppi_backtest` |
 
 ### 3.2 When it runs
 
-`app/services/batch_forecast.py` calls `refresh_ppi_forecast()` and `refresh_lme_forecast()` **once at the start of every batch run** (both the shared-CNG path and the per-row-CNG path — see §4/§6), so the batch always forecasts against the latest predicted LME and PPI values. This is not currently wired into the single-part JSON endpoint.
+`app/services/batch_forecast.py` calls `refresh_ppi_forecast()` and `refresh_lme_forecast()` **once at the start of every batch run** (both the shared-CNG path and the per-row-CNG path — see §4/§6), so the batch always forecasts against the latest predicted LME and PPI values. This is not currently wired into the single-part JSON endpoint. The order matters: `refresh_ppi_forecast()` first (it resets the shared backup flag, see 3.5), then `refresh_lme_forecast()`.
+
+So calling the PPI and LME refresh at the start of every batch run is the newly added feature in this version. And this is took from thapase/srikanth requirements on 10/21/2026   ######### CHANGE
 
 ### 3.3 Safe-by-design behaviour
 
@@ -221,10 +225,22 @@ Both modules are built to never break a batch run:
 
 ### 3.4 Side effects to be aware of
 
-- A successful refresh **writes to `aluminium_data.xlsx` on disk** (new or updated rows in the `LME`/`PPI` sheets, plus the `Accuracy (%)` column). `ppi_forecast.py` makes a timestamped backup copy first (`BACKUP_BEFORE_UPDATE = True`, keeps the newest 2); `lme_forecast.py` currently does not (`BACKUP_BEFORE_UPDATE = False`).
+- A successful refresh **writes to `aluminium_data.xlsx` on disk** (new or updated rows in the `LME`/`PPI` sheets, the `Accuracy (%)` column, and the `lme_backtest` / `ppi_backtest` sheets). A timestamped backup copy is made first, once per batch run — see 3.5.
 - After a successful write, the in-memory Excel cache (`excel_store`) is invalidated, so the very same batch run reads the freshly predicted LME/PPI values.
 - `statsmodels` is imported lazily inside `forecast_lme()` / `forecast_ppi()`, so the app still starts if it isn't installed — only the refresh step fails (and is logged) in that case. It must be added to `requirements.txt` (see §9).
 - Dates in `lme_input` / `ppi_input` and in the `LME` / `PPI` sheets can be written in almost any common format (Excel date, `2026-10`, `Oct 2026`, `Oct'26`, `10/2026`, `01-Oct-26`, an Excel serial number, etc.) — both modules share a flexible `_parse_month()` / `_month_key()` parser for this.
+- `EXCEL_FILE_PATH` may be a `pathlib.Path` on Windows; both modules convert it with `str(path)` before calling string methods such as `.lower()`.
+
+### 3.5 One backup per batch run
+
+- Before the **first** save of a batch run, the workbook is copied to `<name>_backup_YYYYMMDD_HHMMSS.xlsx` in `BACKUP_DIR` (the project folder, or the folder of the `.exe` when the app is frozen). Both modules use `BACKUP_BEFORE_UPDATE = True` and `MAX_BACKUPS = 20`.
+- LME and PPI share **one flag**, `ppi_forecast._backup_done`. `refresh_ppi_forecast()` resets it at its start (`reset_backup_flag()`); whichever module saves first makes the backup, the next one sees the flag and skips it. So whether only PPI, only LME, or both change, there is exactly **one** backup and it holds the original workbook from before the run. Nothing changed → no save → no backup. A failed save deletes that backup and resets the flag.
+- The AOP sync (4.5) uses the same flag, so a run that changes any combination of `lme_input`, `ppi_input` and `AOP_input` still produces one backup with the original sheets.
+- The Midwest sync (7.1) does **not** take a backup.
+
+### 3.6 Backtest sheets (`lme_backtest`, `ppi_backtest`)
+
+With `WRITE_BACKTEST_SHEET = True`, the 12-month backtest used for the accuracy value is also written to its own sheet in the same save: `Month`, `Actual (lme_input) ($/lb)` / `Actual (ppi_input)`, `Predicted (backtest) ($/lb)` / `Predicted (backtest)`. The actual column holds the original `lme_input` / `ppi_input` values (before the IQR outlier fix). The sheet is created if missing and rewritten only when its content really changes.
 
 ---
 
@@ -236,9 +252,9 @@ AOP lets the batch output translate a **unit price forecast** into a **total dol
 
 ### 4.1 Where the quantities come from
 
-`app/data/excel_store.py` exposes `_load_aop_lookup()`, which reads an AOP sheet from the same workbook (Part Number, Tier 1, and one column per month, each header naming a month — mirrors the layout `forecast_engine.build_aop_lookup()` parses) into a lookup keyed by `(part_number, tier_1, 'YYYY-MM')`. Matching is case-insensitive and whitespace-trimmed. If no tier-specific quantity is found, an item-level entry (empty tier) is used as a fallback.
+`app/data/excel_store.py` exposes `_load_aop_lookup()`, which reads the sheet named `AOP` from the workbook **directly from the file on every call** (it is not part of the cached sheets) into a lookup keyed by `(item, tier_1, 'YYYY-MM')`. Two layouts are detected from the header of column B: with a Tier column (`Item | Tier 1 | months…`) the key is `(item, tier, month)`; without one (`Item | months…`) the key is `(item, '', month)` and applies to every tier. Items and tiers are compared after `strip()` and lower-case; month headers can be in any format (`_parse_aop_month()`); blank cells are skipped and non-numeric cells are skipped with a warning. If no tier-specific quantity is found for a part/month, the item-level entry (empty tier) is used as a fallback. It returns `{}` when the `AOP` sheet is missing (no Total AOP column or sheet is then created).
 
-> The exact AOP sheet name/layout lives in `excel_store.py`, which was not part of this review — confirm the sheet name and header format there if a part's Total AOP keeps coming back blank.
+> If a part's Total AOP comes back blank: its Item/Tier text must match the `AOP` sheet (ignoring case and surrounding spaces), the month headers must be readable by `_parse_aop_month()`, and the sheet must be named exactly `AOP`.
 
 ### 4.2 How a total is computed
 
@@ -249,16 +265,32 @@ def compute_total_aop(unit_price: float, aop_qty: Optional[float]) -> Optional[f
     return round(unit_price * aop_qty, 2)
 ```
 
-`unit_price` here is always `predicted_price` (the **final**, deadband-adjusted price), both in the monthly-sheet "Total AOP" column and in the Total AOP Summary sheet.
+`unit_price` here is the **Base Price** of that month, `round(mf.base_price_used, 2)` — the same number shown in the "Base Price" column of the monthly sheet and in the Base Price Summary sheet — not the predicted price. The same rounded base price is used in the monthly-sheet "Total AOP" column, the Total AOP Summary sheet and the JSON preview, so the Excel Grand Total and the JSON `aop_grand_total` match.
+
+So this Total AOP = AOP qty × Base Price is the modified logic in this version. And this is modified as per the thapase requirement on 10/26/2026   ######### CHANGE
 
 ### 4.3 Where it shows up in the batch output
 
 - **Each monthly sheet** gets one extra column, **"Total AOP ($)"**, appended after the normal columns — only when an AOP lookup was found (`aop_lookup` is non-empty). Blank when the part has no AOP quantity for that month.
 - **"Total AOP Summary"** sheet (3rd tab, after Summary and Base Price Summary — only created when an AOP lookup is found): one row per (Part Number, Tier 1), one column per forecast month showing **that month's own** Total AOP (not cumulative — same number as the matching cell in that month's own sheet), plus a final **"Total AOP (All Months)"** column that sums every month for that part. A bold **"Grand Total"** row at the bottom sums only the "Total AOP (All Months)" column (the per-month columns are left blank on that row).
 
+So the Total AOP Summary sheet is the newly added feature in this version. And this is took from thapase/srikanth requirements on 10/22/2026   ######### CHANGE
+
+**JSON preview (`build_preview_from_rows`)** returns the same AOP data as the Excel output, only when an AOP lookup was found: `aop_summary` (one entry per part: `monthly` values in the order of `months`, `total_all_months`, `error`), `aop_grand_total`, and a `total_aop` field inside every row of `monthly_sheets`.
+
 ### 4.4 Programmatic use
 
-`ForecastEngine.apply_aop(response, aop_lookup)` is a standalone helper (not used by the batch flow above, but available for other callers) that takes one part's `ForecastResponse` and an AOP lookup, and returns `{year_month: (aop_qty, total_aop_value)}` for that part, again using the final `predicted_price` by default.
+`ForecastEngine.apply_aop(response, aop_lookup)` is a standalone helper (not used by the batch flow above, but available for other callers) that takes one part's `ForecastResponse` and an AOP lookup, and returns `{year_month: (aop_qty, total_aop_value)}` for that part. **It still multiplies by the final `predicted_price`**, not by the base price, so its numbers will differ from the batch output unless it is changed to `base_price_used` too.
+
+### 4.5 `AOP_input` sync (`aop_sync.py`)
+
+`app/services/aop_sync.py` compares the sheet `AOP_input` with the `AOP` sheet on every batch run. If a value in `AOP_input` is different, the `AOP` sheet is updated and the **original workbook (with the original AOP sheet) is kept in the shared backup** (3.5).
+
+- `AOP_input` must have the **same layout** as `AOP` (`Item | Tier 1 (optional) | month columns`). If only one of the two has a Tier column, the sync is skipped and a warning is logged.
+- Cell by cell: a matching item + month with a different value is overwritten; an item not in `AOP` becomes a new row at the bottom; a month not in `AOP` becomes a new column at the right; a blank or non-numeric `AOP_input` cell is ignored (the `AOP` value stays); items that exist only in `AOP` are untouched.
+- Nothing different → the workbook is not saved and no backup is made. No `AOP_input` sheet → does nothing. Never raises (problems are logged).
+- After a save the Excel cache is invalidated; `_load_aop_lookup()` reads the file directly, so the same run already uses the new quantities.
+- **Hook needed in `batch_forecast.py`:** `from app.services.aop_sync import refresh_aop_from_input`, and one line `refresh_aop_from_input()` right after `refresh_lme_forecast()` in both `_run_forecasts_uniform` and `_run_forecasts_per_row`. It must come after the PPI refresh because that resets the shared backup flag. *This hook and `aop_sync.py` were not in the `batch_forecast.py` reviewed for this README — add them before relying on this section.*
 
 ---
 
@@ -269,7 +301,7 @@ The code imports modules as `app.core...`, `app.data...`, etc. The files below a
 ```
 project/
 ├── main.py                      # FastAPI entry point
-├── aluminium_data.xlsx          # Master data (Parts, LME, Midwest, PPI, lme_input, ppi_input, AOP sheets)
+├── aluminium_data.xlsx          # Master data (Parts, LME, Midwest, PPI, lme_input, ppi_input, AOP; optional midwest_input, AOP_input; written: lme_backtest, ppi_backtest)
 ├── input.xlsx                   # Sample batch input (Part Number, Tier 1[, CNG_Q, CNG_Q-1])
 ├── requirements.txt
 ├── approach.txt                 # Original problem statement (older logic, see §13)
@@ -296,6 +328,7 @@ project/
 │       ├── forecast_engine_v1.py       # Previous version (× 0.91 + offset), reference only
 │       ├── lme_forecast.py             # NEW: SARIMA auto-forecast of the LME sheet
 │       ├── ppi_forecast.py             # NEW: SARIMA auto-forecast of the PPI sheet
+│       ├── aop_sync.py                 # NEW: AOP_input -> AOP sheet (shared backup)
 │       └── batch_forecast.py           # Batch orchestration + output workbook (+ AOP summary)
 │
 └── tests/
@@ -338,7 +371,7 @@ Abstract contracts the engine depends on:
 - **`PartRepository`**: `get_part_weight(part_number, tier_1)`, `get_base_price(part_number, tier_1, year_month)`, plus an optional `get_price_month()` used to give clearer price-month errors.
 
 ### `app/data/excel_store.py` (active data source)
-Loads the `Parts`, `LME`, `Midwest` and `PPI` sheets with `lru_cache`, plus `_load_aop_lookup()` for the AOP sheet (4.1).
+Loads the sheets `Parts`, `LME`, `Midwest`, `PPI`, `AOP`, `lme_input` and `ppi_input` in **one** `pd.read_excel` call with `lru_cache` (all seven must exist — see §13), plus `_load_aop_lookup()` for the AOP quantities (4.1). Just before that read, `_load_workbook_data()` calls `_sync_midwest_from_input(path)` (7.1).
 - Everything is read as text with `keep_default_na=False`, so the supplier name `"NA"` is not turned into NaN.
 - `ExcelMarketDataRepository` looks up month → value for LME, Midwest and PPI.
 - `ExcelPartRepository` matches rows on (Part Number, Tier 1), reading columns **by position** (0 part, 1 tier, 2 weight, 3 price).
@@ -369,17 +402,20 @@ Also in this file (AOP, 4): `build_aop_lookup(rows)`, `compute_total_aop(unit_pr
 Helper functions: `_quarter_of_month`, `_quarter_months`, `_last_month_of_quarter`, `_prev_quarter`, `_month_position_in_quarter`, `_shift_month`, `_compute_mc`, `_ppi_prev_quarter`, `_compute_quarter_context`, `_compute_price_breakdown`, `_price_month_error`.
 
 ### `app/services/lme_forecast.py` (NEW)
-SARIMA auto-forecast of the `LME` sheet from `lme_input` actuals. Entry point: `refresh_lme_forecast(path, force=False)`, called by `batch_forecast.py` before every batch run. See §3 for the full behaviour. Never raises — failures are logged and the existing `LME` sheet is used as-is.
+SARIMA auto-forecast of the `LME` sheet from `lme_input` actuals. Entry point: `refresh_lme_forecast(path, force=False)`, called by `batch_forecast.py` before every batch run. See §3 for the full behaviour. Also writes the `lme_backtest` sheet and takes part in the one-backup-per-run logic (3.5, `_ppi._backup_done`). Never raises — failures are logged and the existing `LME` sheet is used as-is.
 
 ### `app/services/ppi_forecast.py` (NEW)
-SARIMA auto-forecast of the `PPI` sheet from `ppi_input` actuals. Entry point: `refresh_ppi_forecast(path, force=False)`, called by `batch_forecast.py` before every batch run. See §3 for the full behaviour. Never raises — failures are logged and the existing `PPI` sheet is used as-is.
+SARIMA auto-forecast of the `PPI` sheet from `ppi_input` actuals. Entry point: `refresh_ppi_forecast(path, force=False)`, called by `batch_forecast.py` before every batch run. See §3 for the full behaviour. Also writes the `ppi_backtest` sheet and owns the shared backup flag (`_backup_done`, `reset_backup_flag()`, reset at the start of `refresh_ppi_forecast()`, see 3.5). Never raises — failures are logged and the existing `PPI` sheet is used as-is.
+
+### `app/services/aop_sync.py` (NEW)
+Entry point `refresh_aop_from_input(path)`: syncs `AOP_input` into the `AOP` sheet and shares the one backup per run. See 4.5. Needs the hook in `batch_forecast.py` described there.
 
 ### `app/services/batch_forecast.py`
 - **`read_parts_from_upload(file_bytes)`**: finds `Part Number` and `Tier 1` columns (case-insensitive), de-duplicates while keeping order, returns `(part, tier)` tuples. Used by the shared-CNG batch flow.
 - **`read_parts_with_cng_from_upload(file_bytes)`** (NEW): same, plus reads per-row `CNG_Q` and `CNG_Q-1` columns (several header spellings accepted) directly from the upload, so each part can have its own CNG values instead of one shared pair for the whole batch.
 - **`build_forecast_workbook(pairs, engine, cng_q, cng_q_1, include_current_month)`**: shared-CNG path. Calls `refresh_ppi_forecast()` / `refresh_lme_forecast()` first, then runs the engine for each pair. A failing part gets a red **ERROR** row rather than stopping the batch. An error is raised only if every part fails.
 - **`build_forecast_workbook_from_rows(part_rows, engine, include_current_month)`** (NEW): per-row-CNG path, same refresh + error handling, but each part uses its own CNG values from `read_parts_with_cng_from_upload`.
-- **`build_preview_from_rows(part_rows, engine, include_current_month)`** (NEW): returns a JSON-serialisable preview (summary, base price summary, and one entry per monthly sheet) of the same data that goes into the Excel workbook, for on-screen display before downloading. Whether/at what route this is exposed depends on `forecast_batch.py`, which was not reviewed here.
+- **`build_preview_from_rows(part_rows, engine, include_current_month)`** (NEW): returns a JSON-serialisable preview of the same data that goes into the Excel workbook, for on-screen display before downloading: `summary`, `base_price_summary`, `aop_summary` and `aop_grand_total` (only when an AOP lookup exists), and `monthly_sheets` (each row also has `total_aop`). Whether/at what route this is exposed depends on `forecast_batch.py`, which was not reviewed here.
 
 Output workbook sheets (`_build_workbook_from_results`):
 1. **Summary**: predicted (final, with-deadband) price per part per month.
@@ -387,7 +423,7 @@ Output workbook sheets (`_build_workbook_from_results`):
 3. **Total AOP Summary** (NEW, only when an AOP lookup is found — §4.3): Total AOP per part per month, plus an all-months total per part and a grand total.
 4. **One sheet per forecast month** (12, or 13 with the current month), with these columns (see §2.8 for the exact rounding of each):
 
-`Part Number, Tier 1, Weight, Base Price, Quarter (Current), Quarter (Previous), MC_Q, MC_Q-1, PPI_Q, PPI_Q-1, PPI Factor, CNG_Q, CNG_Q-1, AMS_Q, AMS_Q-1, AMS Delta, DF_c, Predicted Price (= raw, without deadband), Final Unit Price with deadband (= the actual final price)[, Total AOP]`
+`Part Number, Tier 1, Weight, Base Price, Quarter (Current), Quarter (Previous), MC_Q, MC_Q-1, PPI_Q, PPI_Q-1, PPI Factor, CNG_Q, CNG_Q-1, AMS_Q, AMS_Q-1, AMS Delta, DF_c, Predicted Price (= raw, without deadband), Final Unit Price with deadband (= the actual final price)[, Total AOP (= AOP qty × Base Price column)]`
 
 > See the note in 2.4 — "Predicted Price" and "Final Unit Price (with deadband)" are intentionally the reverse of what their names might suggest relative to the JSON field names.
 
@@ -449,9 +485,24 @@ Returns a `.xlsx` download named `forecast_<YYYY-MM-DD>.xlsx` with `Content-Disp
 | **PPI** | Month (`YYYY-MM`), value[, Accuracy (%) in row 2] | Index value, not dollars. Can be auto-refreshed from `ppi_input` (§3) |
 | **lme_input** (NEW, optional) | Date, Value | Monthly LME actuals, $/MT. Model input only — the engine never reads this sheet directly |
 | **ppi_input** (NEW, optional) | Date, Value | Monthly PPI actuals. Model input only — the engine never reads this sheet directly |
-| **AOP** (NEW, optional) | Part Number, Tier 1, one column per month (header names the month) | Planned quantities for Total AOP (§4). Sheet name/layout confirmed from the lookup code, not from `excel_store.py` directly |
+| **AOP** (NEW, optional in use, but read at load) | Part Number, Tier 1 (optional), one column per month (header names the month) | Planned quantities for Total AOP (§4), read by `_load_aop_lookup()` |
+| **midwest_input** (NEW, optional) | Month, Future ($/MT), Past ($/lb) | Typed by the user; synced into `Midwest` (7.1) |
+| **AOP_input** (NEW, optional) | same layout as `AOP` | Typed by the user; synced into `AOP` with a backup (4.5) |
+| **lme_backtest / ppi_backtest** (written by the app) | Month, Actual, Predicted | Backtest tables written by the refreshes (3.6). Do not edit |
 
-After editing the workbook, restart the server or call `POST /api/v1/forecast-excel/reload`. Editing `lme_input` / `ppi_input` does not need a manual reload for the batch endpoint — `refresh_lme_forecast()` / `refresh_ppi_forecast()` pick up the change automatically on the next batch run (§3.3) and invalidate the cache themselves.
+After editing the workbook, restart the server or call `POST /api/v1/forecast-excel/reload`. Editing `lme_input` / `ppi_input` does not need a manual reload for the batch endpoint — `refresh_lme_forecast()` / `refresh_ppi_forecast()` pick up the change automatically on the next batch run (§3.3) and invalidate the cache themselves. `AOP_input` is picked up on the next batch run once the hook in 4.5 is in place. `midwest_input` is read only when the workbook is loaded, so use the reload endpoint (or restart) after editing it.
+
+> **All seven sheets listed in 6 (`Parts`, `LME`, `Midwest`, `PPI`, `AOP`, `lme_input`, `ppi_input`) are read in one call.** If any of them is missing, pandas raises and the whole workbook load fails, even though the app treats some of them as optional (§13).
+
+### 7.1 Midwest input sync
+
+`_sync_midwest_from_input(path)` in `excel_store.py` reads the sheet `midwest_input` (`Month | Future ($/MT) | Past ($/lb)`; the Future and Past columns are found by those words, any order) and writes into the `Midwest` sheet (column A = month, column B = $/lb):
+
+- **Future** is divided by `2204.6226` and rounded to 6 decimals (e.g. 1102.31 → 0.499999). **Past** is copied as it is. If a month has both, the converted Future value is used.
+- A month already in `Midwest` is **overwritten** when the value differs; a month not there is **added as a new row** at the bottom (same look as the row above). Months not listed in `midwest_input`, blank cells and text such as `val` are left alone.
+- Nothing different → the file is not saved. No `midwest_input` sheet → does nothing. Never raises (logged).
+- It runs once per workbook load (server start, or after the cache is cleared). It writes with openpyxl, takes **no backup**, and skips the write if the file changed while it was being read.
+- The Future column must hold $/MT: a $/lb number typed there would be divided again.
 
 **Coverage needed:** each forecast month needs LME, Midwest and PPI for itself, and for the previous quarter (the last month, or all three months when that quarter is not yet covered by actuals). Cover roughly two quarters back to 12 months ahead. If `lme_input` / `ppi_input` are present and cover enough history (at least ~24–36 months, more for a reliable backtest), the `LME` / `PPI` sheets' forward coverage is maintained automatically.
 
@@ -604,6 +655,8 @@ So lme and ppi forecasting is the newly added feature in this version. And this 
 - Dates can be in almost any common format (see §3.4) — Excel date cells, `2026-10`, `Oct 2026`, `Oct'26`, `10/2026`, etc.
 - Must have **no gaps** in the month sequence — a missing month raises an error (logged, batch still continues with the existing `LME`/`PPI` sheet).
 
+A backtest sheet (`lme_backtest` / `ppi_backtest`) is written next to these by the refresh (3.6); do not edit it.
+
 ### AOP sheet (optional, drives §4)
 
 | Part Number | Tier 1 | Oct 2026 | Nov 2026 | ... |
@@ -612,6 +665,20 @@ So lme and ppi forecasting is the newly added feature in this version. And this 
 
 - Blank or non-numeric quantity cells are skipped (treated as "no AOP for that part/month").
 - A row with a blank Tier 1 acts as an item-level fallback used when no tier-specific quantity is found for that part/month.
+- Without a Tier column (`Item | months…`), every row applies to all tiers.
+
+### AOP_input sheet (optional, drives 4.5)
+
+Same layout as the `AOP` sheet above. A changed or new value is copied into `AOP`; the original workbook goes into the backup.
+
+### midwest_input sheet (optional, drives 7.1)
+
+| Month (YYYY-MM) | Future($/MT) | Past($/lb) |
+|---|---|---|
+| 2026-08 | | 0.45 |
+| 2026-09 | 1102.31 | |
+
+The month can be in any format. Past is $/lb, Future is $/MT.
 
 CNG is **not** stored in the main `Parts`/`LME`/`Midwest`/`PPI` sheets. It is either supplied once in the request/form (shared-CNG path) or read per row from the **batch input file** (`CNG_Q`, `CNG_Q-1` columns, several header spellings accepted — see §6, `read_parts_with_cng_from_upload`).
 
@@ -672,8 +739,11 @@ Columns `Part Number` and `Tier 1` (case-insensitive) are always required. Optio
 - **Docstrings** in `response.py` (`QuarterContext.mc_q` / `mc_q_1`) still mention the `× 0.91 + 1.25` MC formula. This comment is out of date; the engine uses `+ MC_OFFSET` only.
 - **`excel_store.py`** reads Parts columns by position, so keep the Parts column order unchanged.
 - **Excel column naming swap (2.4, 6, 12):** in the batch output, "Predicted Price" shows the raw, pre-deadband value, and "Final Unit Price (with deadband)" shows the actual final price. This is intentional per the latest requirements but easy to misread, since it's the reverse of the JSON API's `predicted_price` naming. Worth double-checking with downstream consumers of the Excel file.
-- **In-place writes to the workbook (3.4):** a successful LME/PPI refresh modifies `aluminium_data.xlsx` on disk during a batch run. There's no cross-process file lock — if two batch requests (or a batch request and someone editing the file in Excel) overlap, a `PermissionError` or a lost update is possible. `ppi_forecast.py` takes a backup first; `lme_forecast.py` currently does not.
-- **AOP sheet contract is not validated end-to-end here:** `excel_store.py` (which defines `_load_aop_lookup()`) was not part of this review, so the exact AOP sheet name and header parsing should be double-checked against that file directly, especially if Total AOP values come back unexpectedly blank.
+- **In-place writes to the workbook (3.4):** a successful LME/PPI refresh modifies `aluminium_data.xlsx` on disk during a batch run. There's no cross-process file lock — if two batch requests (or a batch request and someone editing the file in Excel) overlap, a `PermissionError` or a lost update is possible. Every run that changes the workbook takes one backup first (3.5), but the Midwest sync (7.1) takes none.
+- **Every sheet is required at load (7):** `_load_workbook_data()` reads `Parts`, `LME`, `Midwest`, `PPI`, `AOP`, `lme_input` and `ppi_input` in one call, so a workbook without `AOP`, `lme_input` or `ppi_input` fails to load even though the AOP and LME/PPI features are described as optional. `_load_aop_lookup()` itself and the refresh modules do handle the missing sheets.
+- **Backup cleanup folder (3.5):** backups are written to `BACKUP_DIR`, but `_prune_backups()` in `lme_forecast.py` / `ppi_forecast.py` looks for old backups in the workbook's folder. If the two folders differ, backups beyond `MAX_BACKUPS` are never deleted.
+- **`ForecastEngine.apply_aop()` is out of step** with the batch output: it still multiplies by `predicted_price` (4.4).
+- **The AOP sync hook (4.5) is not in the `batch_forecast.py` reviewed here.** `aop_sync.py` does nothing until `refresh_aop_from_input()` is called in the batch run.
 - **`forecast_batch.py` endpoint file** (the actual `POST /api/v1/forecast-batch` route handler) was not part of this review either — confirm there which of `build_forecast_workbook` / `build_forecast_workbook_from_rows` / `build_preview_from_rows` it actually calls, and under what conditions it picks the shared-CNG vs. per-row-CNG path.
 
 ---
